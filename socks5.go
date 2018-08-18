@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/url"
@@ -15,19 +16,29 @@ type socks5 struct {
 	forward        Dialer
 }
 
+type SocksReply struct {
+	HostType byte
+	BndHost  string
+	BndPort  uint16
+}
+
 const socks5Version = 5
+const smallBufSize = 0x200
 
 const (
 	socks5AuthNone     = 0
 	socks5AuthPassword = 2
 )
 
-const socks5Connect = 1
+const (
+	socks5Connect = 1
+	socks5UDP     = 3
+)
 
 const (
-	socks5IP4    = 1
-	socks5Domain = 3
-	socks5IP6    = 4
+	Socks5AtypIP4    = 1
+	Socks5AtypDomain = 3
+	Socks5AtypIP6    = 4
 )
 
 var socks5Errors = []string{
@@ -40,6 +51,73 @@ var socks5Errors = []string{
 	"TTL expired",
 	"command not supported",
 	"address type not supported",
+}
+
+func Ntohs(data [2]byte) uint16 {
+	return uint16(data[0])<<8 | uint16(data[1])<<0
+}
+
+func readSocksIPv4Host(r io.Reader) (host string, err error) {
+	var buf [4]byte
+	_, err = io.ReadFull(r, buf[:])
+	if err != nil {
+		return
+	}
+
+	var ip net.IP = buf[:]
+	host = ip.String()
+	return
+}
+
+func readSocksIPv6Host(r io.Reader) (host string, err error) {
+	var buf [16]byte
+	_, err = io.ReadFull(r, buf[:])
+	if err != nil {
+		return
+	}
+
+	var ip net.IP = buf[:]
+	host = ip.String()
+	return
+}
+
+func readSocksDomainHost(r io.Reader) (host string, err error) {
+	var buf [smallBufSize]byte
+	_, err = r.Read(buf[0:1])
+	if err != nil {
+		return
+	}
+	length := buf[0]
+	_, err = io.ReadFull(r, buf[1:1+length])
+	if err != nil {
+		return
+	}
+	host = string(buf[1 : 1+length])
+	return
+}
+
+func readSocksHost(r io.Reader, hostType byte) (string, error) {
+	switch hostType {
+	case Socks5AtypIP4:
+		return readSocksIPv4Host(r)
+	case Socks5AtypIP6:
+		return readSocksIPv6Host(r)
+	case Socks5AtypDomain:
+		return readSocksDomainHost(r)
+	default:
+		return string(""), fmt.Errorf("Unknown address type 0x%02x", hostType)
+	}
+}
+
+func readSocksPort(r io.Reader) (port uint16, err error) {
+	var buf [2]byte
+	_, err = io.ReadFull(r, buf[:])
+	if err != nil {
+		return
+	}
+
+	port = Ntohs(buf)
+	return
 }
 
 // Dial connects to the address addr on the network net via the SOCKS5 proxy.
@@ -136,36 +214,44 @@ func (s *socks5) connectAndAuth(conn net.Conn, host string, port int) error {
 }
 
 func (s *socks5) socks5ConnectRequest(conn net.Conn, host string, port int) error {
+	_, err := socks5Request(conn, host, port, socks5Connect)
+	return err
+}
+
+func socks5Request(conn net.Conn, host string, port int, cmd byte) (reply *SocksReply, err error) {
 	// the size here is just an estimate
 	buf := make([]byte, 0, 6+len(host))
 
 	buf = buf[:0]
-	buf = append(buf, socks5Version, socks5Connect, 0 /* reserved */)
+	buf = append(buf, socks5Version, cmd, 0 /* reserved */)
 
 	if ip := net.ParseIP(host); ip != nil {
 		if ip4 := ip.To4(); ip4 != nil {
-			buf = append(buf, socks5IP4)
+			buf = append(buf, Socks5AtypIP4)
 			ip = ip4
 		} else {
-			buf = append(buf, socks5IP6)
+			buf = append(buf, Socks5AtypIP6)
 		}
 		buf = append(buf, ip...)
 	} else {
 		if len(host) > 255 {
-			return errors.New("proxy: destination hostname too long: " + host)
+			err = errors.New("proxy: destination hostname too long: " + host)
+			return
 		}
-		buf = append(buf, socks5Domain)
+		buf = append(buf, Socks5AtypDomain)
 		buf = append(buf, byte(len(host)))
 		buf = append(buf, host...)
 	}
 	buf = append(buf, byte(port>>8), byte(port))
 
-	if _, err := conn.Write(buf); err != nil {
-		return errors.New("proxy: failed to write connect request to SOCKS5 proxy at " + s.addr + ": " + err.Error())
+	if _, err = conn.Write(buf); err != nil {
+		err = errors.New("proxy: failed to write connect request to SOCKS5 proxy: " + err.Error())
+		return
 	}
 
-	if _, err := io.ReadFull(conn, buf[:4]); err != nil {
-		return errors.New("proxy: failed to read connect reply from SOCKS5 proxy at " + s.addr + ": " + err.Error())
+	if _, err = io.ReadFull(conn, buf[:4]); err != nil {
+		err = errors.New("proxy: failed to read connect reply from SOCKS5 proxy: " + err.Error())
+		return
 	}
 
 	failure := "unknown error"
@@ -174,40 +260,46 @@ func (s *socks5) socks5ConnectRequest(conn net.Conn, host string, port int) erro
 	}
 
 	if len(failure) > 0 {
-		return errors.New("proxy: SOCKS5 proxy at " + s.addr + " failed to connect: " + failure)
+		err = errors.New("proxy: SOCKS5 proxy failed to connect: " + failure)
+		return
 	}
 
-	bytesToDiscard := 0
-	switch buf[3] {
-	case socks5IP4:
-		bytesToDiscard = net.IPv4len
-	case socks5IP6:
-		bytesToDiscard = net.IPv6len
-	case socks5Domain:
-		_, err := io.ReadFull(conn, buf[:1])
-		if err != nil {
-			return errors.New("proxy: failed to read domain length from SOCKS5 proxy at " + s.addr + ": " + err.Error())
-		}
-		bytesToDiscard = int(buf[0])
-	default:
-		return errors.New("proxy: got unknown address type " + strconv.Itoa(int(buf[3])) + " from SOCKS5 proxy at " + s.addr)
+	hostType := buf[3]
+	bndAddr, err := readSocksHost(conn, hostType)
+	if err != nil {
+		err = fmt.Errorf("proxy: invalid request: fail to read dst host: %s", err)
+		return
 	}
 
-	if cap(buf) < bytesToDiscard {
-		buf = make([]byte, bytesToDiscard)
-	} else {
-		buf = buf[:bytesToDiscard]
-	}
-	if _, err := io.ReadFull(conn, buf); err != nil {
-		return errors.New("proxy: failed to read address from SOCKS5 proxy at " + s.addr + ": " + err.Error())
+	bndPort, err := readSocksPort(conn)
+	if err != nil {
+		err = fmt.Errorf("proxy: invalid request: fail to read dst port: %s", err)
+		return
 	}
 
-	// Also need to discard the port number
-	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
-		return errors.New("proxy: failed to read port from SOCKS5 proxy at " + s.addr + ": " + err.Error())
+	reply = &SocksReply{hostType, bndAddr, bndPort}
+	return
+}
+
+func Socks5UDPRequest(conn net.Conn, host string, port int) (socks5UDPListen *net.UDPConn, reply *SocksReply, err error) {
+	socks5UDPAddr := conn.LocalAddr().(*net.TCPAddr)
+	socks5UDPListen, err = net.ListenUDP("udp", &net.UDPAddr{
+		IP:   socks5UDPAddr.IP,
+		Port: 0,
+		Zone: socks5UDPAddr.Zone,
+	})
+	if err != nil {
+		conn.Close()
+		return
+	}
+	reply, err = socks5Request(conn, host, port, socks5UDP)
+	if err != nil {
+		socks5UDPListen.Close()
+		conn.Close()
+		return
 	}
 
-	return nil
+	return
 }
 
 func init() {
