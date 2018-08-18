@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 type socks5 struct {
@@ -42,41 +43,50 @@ var socks5Errors = []string{
 }
 
 // Dial connects to the address addr on the network net via the SOCKS5 proxy.
-func (s *socks5) Dial(network, addr string) (net.Conn, error) {
+func (s *socks5) Dial(network, targetAddr string) (net.Conn, error) {
 	switch network {
 	case "tcp", "tcp6", "tcp4":
+	case "udp", "udp6", "udp4":
 	default:
 		return nil, errors.New("proxy: no support for SOCKS5 proxy connections of type " + network)
+	}
+
+	host, portStr, err := net.SplitHostPort(targetAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, errors.New("proxy: failed to parse port number: " + portStr)
+	}
+	if port < 1 || port > 0xffff {
+		return nil, errors.New("proxy: port number out of range: " + portStr)
 	}
 
 	conn, err := s.forward.Dial(s.network, s.addr)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.connect(conn, addr); err != nil {
+
+	if err := s.connectAndAuth(conn, host, port); err != nil {
 		conn.Close()
 		return nil, err
+	}
+
+	if strings.HasPrefix(network, "tcp") {
+		if err := s.socks5ConnectRequest(conn, host, port); err != nil {
+			conn.Close()
+			return nil, err
+		}
 	}
 	return conn, nil
 }
 
-// connect takes an existing connection to a socks5 proxy server,
+// connectAndAuth takes an existing connection to a socks5 proxy server,
 // and commands the server to extend that connection to target,
 // which must be a canonical address with a host and port.
-func (s *socks5) connect(conn net.Conn, target string) error {
-	host, portStr, err := net.SplitHostPort(target)
-	if err != nil {
-		return err
-	}
-
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		return errors.New("proxy: failed to parse port number: " + portStr)
-	}
-	if port < 1 || port > 0xffff {
-		return errors.New("proxy: port number out of range: " + portStr)
-	}
-
+func (s *socks5) connectAndAuth(conn net.Conn, host string, port int) error {
 	// the size here is just an estimate
 	buf := make([]byte, 0, 6+len(host))
 
@@ -121,6 +131,13 @@ func (s *socks5) connect(conn net.Conn, target string) error {
 			return errors.New("proxy: SOCKS5 proxy at " + s.addr + " rejected username/password")
 		}
 	}
+
+	return nil
+}
+
+func (s *socks5) socks5ConnectRequest(conn net.Conn, host string, port int) error {
+	// the size here is just an estimate
+	buf := make([]byte, 0, 6+len(host))
 
 	buf = buf[:0]
 	buf = append(buf, socks5Version, socks5Connect, 0 /* reserved */)

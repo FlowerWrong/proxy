@@ -44,20 +44,20 @@ func (p *Proxy) Dial(network, addr string) (net.Conn, error) {
 	return p.dialer.Dial(network, addr)
 }
 
-func FromUrl(rawurl string) (*Proxy, error) {
-	u, err := url.Parse(rawurl)
+func FromUrl(rawURL string) (*Proxy, error) {
+	u, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, err
 	}
 
-	dailer, err := getDialerByURL(u, Direct)
+	d, err := getDialerByURL(u, Direct)
 	if err != nil {
 		return nil, err
 	}
 
 	proxy := &Proxy{
 		Url:    u,
-		dialer: dailer,
+		dialer: d,
 	}
 
 	return proxy, nil
