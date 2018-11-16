@@ -27,6 +27,7 @@ func transfer(destination io.WriteCloser, source io.ReadCloser) {
 	io.Copy(destination, source)
 }
 
+// https proxy
 func handleTunneling(w http.ResponseWriter, r *http.Request) {
 	log.Println("proxy https")
 	destConn, err := net.DialTimeout("tcp", r.Host, 10*time.Second)
@@ -34,20 +35,31 @@ func handleTunneling(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
+
+	// Any successful (2xx) response to a CONNECT request indicates that the
+	// proxy has established a connection to the requested host and port,
+	// and has switched to tunneling the current connection to that server
+	// connection.
+	// See https://www.ietf.org/rfc/rfc2817.txt
 	w.WriteHeader(http.StatusOK)
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
 		return
 	}
+
+	// 转变为普通tcp连接
 	clientConn, _, err := hijacker.Hijack()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 	}
+
+	// 对倒tcp flow
 	go transfer(destConn, clientConn)
 	go transfer(clientConn, destConn)
 }
 
+// http proxy
 func handleHTTP(w http.ResponseWriter, req *http.Request) {
 	log.Println("proxy http")
 	resp, err := http.DefaultTransport.RoundTrip(req)
@@ -61,6 +73,9 @@ func handleHTTP(w http.ResponseWriter, req *http.Request) {
 	io.Copy(w, resp.Body)
 }
 
+// go run cmd/http11_proxy.go
+// curl -v -i -x http://127.0.0.1:8080 'https://baidu.com'
+// curl -v -i -x http://127.0.0.1:8080 'http://baidu.com'
 func main() {
 	rand.Seed(time.Now().UnixNano())
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
@@ -70,12 +85,14 @@ func main() {
 		Addr: ":8080",
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodConnect {
+				// https or websocket
 				handleTunneling(w, r)
 			} else {
+				// http
 				handleHTTP(w, r)
 			}
 		}),
-		// Disable HTTP/2.
+		// disable HTTP2
 		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
 	}
 	log.Fatal(server.ListenAndServe())

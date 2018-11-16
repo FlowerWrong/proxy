@@ -17,6 +17,7 @@ func parseQuery(m *dns.Msg) {
 		case dns.TypeA:
 			log.Printf("Query for %s\n", q.Name)
 
+			// 所有dns请求都返回6.6.6.6
 			rr, err := dns.NewRR(fmt.Sprintf("%s A %s", q.Name, "6.6.6.6"))
 			if err == nil {
 				m.Answer = append(m.Answer, rr)
@@ -38,12 +39,14 @@ func handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 	w.WriteMsg(m)
 }
 
+// go run cmd/dns.go
+// dig @127.0.0.1 -p 5354 google.com
 func main() {
 	rand.Seed(time.Now().UnixNano())
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
-	// attach request handler func
+	// ServeMux handler
 	dns.HandleFunc(".", handleDNSRequest)
 
 	// start server

@@ -8,7 +8,8 @@ import (
 	"time"
 )
 
-func HelloServer(w http.ResponseWriter, req *http.Request) {
+// HelloHandler ...
+func HelloHandler(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 	w.Write([]byte("This is an example server.\n"))
 }
@@ -21,7 +22,7 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
-	http.HandleFunc("/hello", HelloServer)
+	http.HandleFunc("/hello", HelloHandler)
 	err := http.ListenAndServeTLS(":1443", "tls-gen/basic/server/cert.pem", "tls-gen/basic/server/key.pem", nil)
 	if err != nil {
 		log.Fatal("ListenAndServe: ", err)
