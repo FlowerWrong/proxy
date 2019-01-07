@@ -28,7 +28,7 @@ func registerDialerType(scheme string, f func(*url.URL, Dialer) (Dialer, error))
 	proxySchemes[scheme] = f
 }
 
-func getDialerByURL(u *url.URL, forward Dialer) (Dialer, error) {
+func GetDialerByURL(u *url.URL, forward Dialer) (Dialer, error) {
 	if f, ok := proxySchemes[u.Scheme]; ok {
 		return f(u, forward)
 	}
@@ -36,12 +36,12 @@ func getDialerByURL(u *url.URL, forward Dialer) (Dialer, error) {
 }
 
 type Proxy struct {
-	Url    *url.URL
-	dialer Dialer
+	Url *url.URL
+	D   Dialer
 }
 
 func (p *Proxy) Dial(network, addr string) (net.Conn, error) {
-	return p.dialer.Dial(network, addr)
+	return p.D.Dial(network, addr)
 }
 
 func FromUrl(rawURL string) (*Proxy, error) {
@@ -50,14 +50,14 @@ func FromUrl(rawURL string) (*Proxy, error) {
 		return nil, err
 	}
 
-	d, err := getDialerByURL(u, Direct)
+	d, err := GetDialerByURL(u, DirectInstance)
 	if err != nil {
 		return nil, err
 	}
 
 	proxy := &Proxy{
-		Url:    u,
-		dialer: d,
+		Url: u,
+		D:   d,
 	}
 
 	return proxy, nil

@@ -2,13 +2,22 @@ package proxy
 
 import (
 	"net"
+	"syscall"
 )
 
-type direct struct{}
+type Direct struct {
+	ControlFun func(fd uintptr)
+}
 
-// Direct is a direct proxy: one that makes network connections directly.
-var Direct = direct{}
+// DirectInstance is a Direct proxy: one that makes network connections directly.
+var DirectInstance = Direct{
+	ControlFun: func(fd uintptr) {
+	},
+}
 
-func (direct) Dial(network, addr string) (net.Conn, error) {
-	return net.Dial(network, addr)
+func (direct Direct) Dial(network, addr string) (net.Conn, error) {
+	d := net.Dialer{Control: func(network, address string, c syscall.RawConn) error {
+		return c.Control(direct.ControlFun)
+	}}
+	return d.Dial(network, addr)
 }
